@@ -1,109 +1,177 @@
 import React, { createContext, useContext, useState, useEffect, type ReactNode } from 'react';
-import type { User, AuthState } from '../types';
-import { mockUsers } from '../data/mockData';
+import {
+    onAuthStateChanged,
+    signInWithEmailAndPassword,
+    createUserWithEmailAndPassword,
+    signOut,
+    type User as FirebaseUser,
+} from 'firebase/auth';
+import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { auth, db } from '../lib/firebase';
+import type { User } from '../types';
 
-interface AuthContextType extends AuthState {
-    login: (email: string) => Promise<boolean>;
-    verifyOtp: (otp: string) => Promise<boolean>;
-    logout: () => void;
-    pendingEmail: string | null;
+interface AuthContextType {
+    user: User | null;
+    firebaseUser: FirebaseUser | null;
+    isAuthenticated: boolean;
+    isLoading: boolean;
+    login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
+    register: (email: string, password: string, name: string) => Promise<{ success: boolean; error?: string }>;
+    logout: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 const STORAGE_KEY = 'arisan_user';
-const MOCK_OTP = '123456'; // For testing
 
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
     const [user, setUser] = useState<User | null>(null);
+    const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
     const [isLoading, setIsLoading] = useState(true);
-    const [pendingEmail, setPendingEmail] = useState<string | null>(null);
 
-    // Load user from localStorage on mount
+    // Listen to Firebase Auth state changes
     useEffect(() => {
-        const stored = localStorage.getItem(STORAGE_KEY);
-        if (stored) {
-            try {
-                const parsed = JSON.parse(stored);
-                setUser({
-                    ...parsed,
-                    createdAt: new Date(parsed.createdAt),
-                });
-            } catch (e) {
+        const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
+            setFirebaseUser(fbUser);
+
+            if (fbUser) {
+                // Fetch user data from Firestore
+                try {
+                    const userDoc = await getDoc(doc(db, 'users', fbUser.uid));
+                    if (userDoc.exists()) {
+                        const userData = userDoc.data();
+                        const appUser: User = {
+                            id: fbUser.uid,
+                            name: userData.name || fbUser.displayName || 'User',
+                            email: userData.email || fbUser.email || '',
+                            phone: userData.phone || '',
+                            avatar: userData.avatar,
+                            createdAt: userData.createdAt?.toDate() || new Date(),
+                        };
+                        setUser(appUser);
+                        localStorage.setItem(STORAGE_KEY, JSON.stringify(appUser));
+                    } else {
+                        // Create user document if doesn't exist
+                        const newUser: User = {
+                            id: fbUser.uid,
+                            name: fbUser.displayName || fbUser.email?.split('@')[0] || 'User',
+                            email: fbUser.email || '',
+                            phone: '',
+                            createdAt: new Date(),
+                        };
+                        await setDoc(doc(db, 'users', fbUser.uid), {
+                            ...newUser,
+                            createdAt: serverTimestamp(),
+                        });
+                        setUser(newUser);
+                        localStorage.setItem(STORAGE_KEY, JSON.stringify(newUser));
+                    }
+                } catch (error) {
+                    console.error('Error fetching user data:', error);
+                    // Fallback to basic user info
+                    const basicUser: User = {
+                        id: fbUser.uid,
+                        name: fbUser.displayName || fbUser.email?.split('@')[0] || 'User',
+                        email: fbUser.email || '',
+                        phone: '',
+                        createdAt: new Date(),
+                    };
+                    setUser(basicUser);
+                }
+            } else {
+                setUser(null);
                 localStorage.removeItem(STORAGE_KEY);
             }
-        }
-        setIsLoading(false);
+
+            setIsLoading(false);
+        });
+
+        return () => unsubscribe();
     }, []);
 
-    // Save user to localStorage when it changes
-    useEffect(() => {
-        if (user) {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(user));
-        } else {
-            localStorage.removeItem(STORAGE_KEY);
+    const login = async (email: string, password: string): Promise<{ success: boolean; error?: string }> => {
+        try {
+            await signInWithEmailAndPassword(auth, email, password);
+            return { success: true };
+        } catch (error: unknown) {
+            const firebaseError = error as { code?: string; message?: string };
+            let errorMessage = 'Login gagal. Silakan coba lagi.';
+
+            switch (firebaseError.code) {
+                case 'auth/user-not-found':
+                    errorMessage = 'Email tidak terdaftar.';
+                    break;
+                case 'auth/wrong-password':
+                    errorMessage = 'Password salah.';
+                    break;
+                case 'auth/invalid-email':
+                    errorMessage = 'Format email tidak valid.';
+                    break;
+                case 'auth/too-many-requests':
+                    errorMessage = 'Terlalu banyak percobaan. Coba lagi nanti.';
+                    break;
+                case 'auth/invalid-credential':
+                    errorMessage = 'Email atau password salah.';
+                    break;
+            }
+
+            return { success: false, error: errorMessage };
         }
-    }, [user]);
-
-    const login = async (email: string): Promise<boolean> => {
-        // Simulate API call
-        await new Promise(resolve => setTimeout(resolve, 1000));
-
-        // Store pending email for OTP verification
-        setPendingEmail(email);
-
-        // In real app, send OTP to email
-        console.log(`🔐 OTP untuk ${email}: ${MOCK_OTP}`);
-
-        return true;
     };
 
-    const verifyOtp = async (otp: string): Promise<boolean> => {
-        if (!pendingEmail) return false;
+    const register = async (email: string, password: string, name: string): Promise<{ success: boolean; error?: string }> => {
+        try {
+            const userCredential = await createUserWithEmailAndPassword(auth, email, password);
 
-        // Simulate API call
-        await new Promise(resolve => setTimeout(resolve, 500));
-
-        // Verify OTP (mock: accept 123456)
-        if (otp !== MOCK_OTP) {
-            return false;
-        }
-
-        // Check if user exists or create new one
-        let existingUser = mockUsers.find(u => u.email === pendingEmail);
-
-        if (!existingUser) {
-            // Create new user
-            existingUser = {
-                id: `user-${Date.now()}`,
-                name: pendingEmail.split('@')[0],
-                email: pendingEmail,
+            // Create user document in Firestore
+            await setDoc(doc(db, 'users', userCredential.user.uid), {
+                name,
+                email,
                 phone: '',
-                createdAt: new Date(),
-            };
+                createdAt: serverTimestamp(),
+            });
+
+            return { success: true };
+        } catch (error: unknown) {
+            const firebaseError = error as { code?: string; message?: string };
+            let errorMessage = 'Registrasi gagal. Silakan coba lagi.';
+
+            switch (firebaseError.code) {
+                case 'auth/email-already-in-use':
+                    errorMessage = 'Email sudah terdaftar.';
+                    break;
+                case 'auth/weak-password':
+                    errorMessage = 'Password terlalu lemah. Minimal 6 karakter.';
+                    break;
+                case 'auth/invalid-email':
+                    errorMessage = 'Format email tidak valid.';
+                    break;
+            }
+
+            return { success: false, error: errorMessage };
         }
-
-        setUser(existingUser);
-        setPendingEmail(null);
-
-        return true;
     };
 
-    const logout = () => {
-        setUser(null);
-        setPendingEmail(null);
+    const logout = async (): Promise<void> => {
+        try {
+            await signOut(auth);
+            setUser(null);
+            localStorage.removeItem(STORAGE_KEY);
+        } catch (error) {
+            console.error('Logout error:', error);
+        }
     };
 
     return (
         <AuthContext.Provider
             value={{
                 user,
+                firebaseUser,
                 isAuthenticated: !!user,
                 isLoading,
                 login,
-                verifyOtp,
+                register,
                 logout,
-                pendingEmail,
             }}
         >
             {children}

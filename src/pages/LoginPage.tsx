@@ -1,25 +1,27 @@
 import React, { useState } from 'react';
 import { useNavigate, useLocation, Link } from 'react-router-dom';
-import { Wallet, Mail, KeyRound, ArrowLeft, Loader2 } from 'lucide-react';
+import { Wallet, Mail, Lock, ArrowLeft, Loader2, User, Eye, EyeOff } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
-type Step = 'email' | 'otp';
+type Mode = 'login' | 'register';
 
 const LoginPage: React.FC = () => {
     const navigate = useNavigate();
     const location = useLocation();
-    const { login, verifyOtp, pendingEmail } = useAuth();
+    const { login, register } = useAuth();
 
-    const [step, setStep] = useState<Step>('email');
+    const [mode, setMode] = useState<Mode>('login');
     const [email, setEmail] = useState('');
-    const [otp, setOtp] = useState('');
+    const [password, setPassword] = useState('');
+    const [name, setName] = useState('');
+    const [showPassword, setShowPassword] = useState(false);
     const [error, setError] = useState('');
     const [isLoading, setIsLoading] = useState(false);
 
     // Get redirect path from location state
     const redirectPath = (location.state as { redirect?: string })?.redirect || '/dashboard';
 
-    const handleSendOtp = async (e: React.FormEvent) => {
+    const handleLogin = async (e: React.FormEvent) => {
         e.preventDefault();
         setError('');
 
@@ -28,45 +30,64 @@ const LoginPage: React.FC = () => {
             return;
         }
 
-        setIsLoading(true);
-        try {
-            await login(email);
-            setStep('otp');
-        } catch (err) {
-            setError('Gagal mengirim OTP. Coba lagi.');
-        } finally {
-            setIsLoading(false);
-        }
-    };
-
-    const handleVerifyOtp = async (e: React.FormEvent) => {
-        e.preventDefault();
-        setError('');
-
-        if (otp.length !== 6) {
-            setError('Masukkan 6 digit kode OTP');
+        if (password.length < 6) {
+            setError('Password minimal 6 karakter');
             return;
         }
 
         setIsLoading(true);
         try {
-            const success = await verifyOtp(otp);
-            if (success) {
+            const result = await login(email, password);
+            if (result.success) {
                 navigate(redirectPath);
             } else {
-                setError('Kode OTP salah. Coba lagi.');
+                setError(result.error || 'Login gagal');
             }
         } catch (err) {
-            setError('Verifikasi gagal. Coba lagi.');
+            setError('Login gagal. Coba lagi.');
         } finally {
             setIsLoading(false);
         }
     };
 
-    const handleOtpChange = (value: string) => {
-        // Only allow numbers and max 6 digits
-        const cleaned = value.replace(/\D/g, '').slice(0, 6);
-        setOtp(cleaned);
+    const handleRegister = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setError('');
+
+        if (!name.trim()) {
+            setError('Masukkan nama lengkap');
+            return;
+        }
+
+        if (!email.trim() || !email.includes('@')) {
+            setError('Masukkan email yang valid');
+            return;
+        }
+
+        if (password.length < 6) {
+            setError('Password minimal 6 karakter');
+            return;
+        }
+
+        setIsLoading(true);
+        try {
+            const result = await register(email, password, name);
+            if (result.success) {
+                navigate(redirectPath);
+            } else {
+                setError(result.error || 'Registrasi gagal');
+            }
+        } catch (err) {
+            setError('Registrasi gagal. Coba lagi.');
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const switchMode = () => {
+        setMode(mode === 'login' ? 'register' : 'login');
+        setError('');
+        setPassword('');
     };
 
     return (
@@ -85,117 +106,112 @@ const LoginPage: React.FC = () => {
                 {/* Card */}
                 <div className="card">
                     <div className="card-body">
-                        {step === 'email' ? (
-                            <>
-                                <div className="text-center mb-lg">
-                                    <div className="avatar avatar-lg mx-auto mb-md" style={{ margin: '0 auto', marginBottom: 'var(--space-md)' }}>
-                                        <Mail size={28} />
-                                    </div>
-                                    <h1 className="text-xl font-bold">Masuk / Daftar</h1>
-                                    <p className="text-sm text-muted mt-sm">
-                                        Masukkan email untuk melanjutkan
-                                    </p>
-                                </div>
+                        <div className="text-center mb-lg">
+                            <div className="avatar avatar-lg mx-auto mb-md" style={{ margin: '0 auto', marginBottom: 'var(--space-md)' }}>
+                                {mode === 'login' ? <Mail size={28} /> : <User size={28} />}
+                            </div>
+                            <h1 className="text-xl font-bold">
+                                {mode === 'login' ? 'Masuk' : 'Daftar Akun Baru'}
+                            </h1>
+                            <p className="text-sm text-muted mt-sm">
+                                {mode === 'login'
+                                    ? 'Masukkan email dan password'
+                                    : 'Buat akun untuk mulai arisan'}
+                            </p>
+                        </div>
 
-                                <form onSubmit={handleSendOtp}>
-                                    <div className="form-group">
-                                        <label className="form-label">Email</label>
-                                        <input
-                                            type="email"
-                                            className={`form-input ${error ? 'form-input-error' : ''}`}
-                                            placeholder="nama@email.com"
-                                            value={email}
-                                            onChange={(e) => setEmail(e.target.value)}
-                                            autoFocus
-                                            disabled={isLoading}
-                                        />
-                                        {error && <p className="form-helper form-error">{error}</p>}
-                                    </div>
-
-                                    <button
-                                        type="submit"
-                                        className="btn btn-primary w-full"
+                        <form onSubmit={mode === 'login' ? handleLogin : handleRegister}>
+                            {mode === 'register' && (
+                                <div className="form-group">
+                                    <label className="form-label">Nama Lengkap</label>
+                                    <input
+                                        type="text"
+                                        className="form-input"
+                                        placeholder="Nama kamu"
+                                        value={name}
+                                        onChange={(e) => setName(e.target.value)}
                                         disabled={isLoading}
-                                    >
-                                        {isLoading ? (
-                                            <>
-                                                <Loader2 size={20} className="animate-pulse" />
-                                                Mengirim...
-                                            </>
-                                        ) : (
-                                            'Kirim Kode OTP'
-                                        )}
-                                    </button>
-                                </form>
-
-                                <p className="text-center text-sm text-muted mt-lg">
-                                    Dengan melanjutkan, kamu menyetujui<br />
-                                    <a href="#">Syarat & Ketentuan</a> kami
-                                </p>
-                            </>
-                        ) : (
-                            <>
-                                <div className="text-center mb-lg">
-                                    <div className="avatar avatar-lg mx-auto mb-md" style={{ margin: '0 auto', marginBottom: 'var(--space-md)' }}>
-                                        <KeyRound size={28} />
-                                    </div>
-                                    <h1 className="text-xl font-bold">Verifikasi OTP</h1>
-                                    <p className="text-sm text-muted mt-sm">
-                                        Masukkan 6 digit kode yang dikirim ke<br />
-                                        <strong>{pendingEmail}</strong>
-                                    </p>
+                                    />
                                 </div>
+                            )}
 
-                                <form onSubmit={handleVerifyOtp}>
-                                    <div className="form-group">
-                                        <label className="form-label">Kode OTP</label>
-                                        <input
-                                            type="text"
-                                            inputMode="numeric"
-                                            className={`form-input text-center text-2xl font-bold ${error ? 'form-input-error' : ''}`}
-                                            placeholder="• • • • • •"
-                                            value={otp}
-                                            onChange={(e) => handleOtpChange(e.target.value)}
-                                            autoFocus
-                                            disabled={isLoading}
-                                            style={{ letterSpacing: '0.5em' }}
-                                        />
-                                        {error && <p className="form-helper form-error">{error}</p>}
-                                        <p className="form-helper">
-                                            💡 Hint: Gunakan <strong>123456</strong> untuk testing
-                                        </p>
-                                    </div>
+                            <div className="form-group">
+                                <label className="form-label">Email</label>
+                                <input
+                                    type="email"
+                                    className={`form-input ${error ? 'form-input-error' : ''}`}
+                                    placeholder="nama@email.com"
+                                    value={email}
+                                    onChange={(e) => setEmail(e.target.value)}
+                                    autoFocus
+                                    disabled={isLoading}
+                                />
+                            </div>
 
+                            <div className="form-group">
+                                <label className="form-label">Password</label>
+                                <div style={{ position: 'relative' }}>
+                                    <input
+                                        type={showPassword ? 'text' : 'password'}
+                                        className={`form-input ${error ? 'form-input-error' : ''}`}
+                                        placeholder="Minimal 6 karakter"
+                                        value={password}
+                                        onChange={(e) => setPassword(e.target.value)}
+                                        disabled={isLoading}
+                                        style={{ paddingRight: 44 }}
+                                    />
                                     <button
-                                        type="submit"
-                                        className="btn btn-primary w-full"
-                                        disabled={isLoading || otp.length !== 6}
+                                        type="button"
+                                        onClick={() => setShowPassword(!showPassword)}
+                                        style={{
+                                            position: 'absolute',
+                                            right: 12,
+                                            top: '50%',
+                                            transform: 'translateY(-50%)',
+                                            background: 'none',
+                                            border: 'none',
+                                            cursor: 'pointer',
+                                            color: 'var(--text-muted)',
+                                        }}
                                     >
-                                        {isLoading ? (
-                                            <>
-                                                <Loader2 size={20} className="animate-pulse" />
-                                                Memverifikasi...
-                                            </>
-                                        ) : (
-                                            'Verifikasi'
-                                        )}
+                                        {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
                                     </button>
-                                </form>
+                                </div>
+                            </div>
 
-                                <button
-                                    type="button"
-                                    className="btn btn-ghost w-full mt-md"
-                                    onClick={() => {
-                                        setStep('email');
-                                        setOtp('');
-                                        setError('');
-                                    }}
-                                >
-                                    <ArrowLeft size={18} />
-                                    Ganti Email
-                                </button>
-                            </>
-                        )}
+                            {error && <p className="form-helper form-error">{error}</p>}
+
+                            <button
+                                type="submit"
+                                className="btn btn-primary w-full mt-md"
+                                disabled={isLoading}
+                            >
+                                {isLoading ? (
+                                    <>
+                                        <Loader2 size={20} className="animate-pulse" />
+                                        {mode === 'login' ? 'Masuk...' : 'Mendaftar...'}
+                                    </>
+                                ) : (
+                                    <>
+                                        {mode === 'login' ? <Lock size={18} /> : <User size={18} />}
+                                        {mode === 'login' ? 'Masuk' : 'Daftar'}
+                                    </>
+                                )}
+                            </button>
+                        </form>
+
+                        <div className="text-center mt-lg">
+                            <p className="text-sm text-muted">
+                                {mode === 'login' ? 'Belum punya akun?' : 'Sudah punya akun?'}
+                            </p>
+                            <button
+                                type="button"
+                                className="btn btn-ghost btn-sm mt-sm"
+                                onClick={switchMode}
+                            >
+                                {mode === 'login' ? 'Daftar Sekarang' : 'Masuk'}
+                            </button>
+                        </div>
                     </div>
                 </div>
 
