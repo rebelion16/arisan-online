@@ -1,13 +1,14 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import {
     ArrowLeft, ArrowRight, Wallet, Users, Shuffle,
     Check, Share2, Copy, Crown, DollarSign, Calendar,
-    Plus, Trash2, GripVertical, ChevronUp, ChevronDown
+    Plus, Trash2, GripVertical, ChevronUp, ChevronDown, TrendingDown
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useArisan } from '../../context/ArisanContext';
-import type { CreateArisanFormData, ArisanPeriod, TurnMethod, Member } from '../../types';
+import type { CreateArisanFormData, ArisanPeriod, TurnMethod, Member, ArisanMode } from '../../types';
+import { formatCurrency } from '../../data/mockData';
 
 type Step = 1 | 2 | 3 | 4;
 
@@ -17,6 +18,26 @@ interface MemberInput {
     role: 'ketua' | 'bendahara' | 'anggota';
     contributionAmount: string; // Individual iuran amount
 }
+
+// Calculate descending contribution amounts
+// Giliran 1 = N%, Giliran 2 = (N-1)%, ..., Giliran N = 1%
+// Contoh 12 anggota: 12%, 11%, 10%, 9%, 8%, 7%, 6%, 5%, 4%, 3%, 2%, 1%
+const calculateDescendingContributions = (targetAmount: number, totalMembers: number): number[] => {
+    if (totalMembers < 2 || targetAmount <= 0) return [];
+
+    const contributions: number[] = [];
+    const n = totalMembers;
+
+    // Simple linear percentage: Turn i gets (N - i + 1)% 
+    for (let i = 1; i <= n; i++) {
+        const percentage = n - i + 1; // Giliran 1 = N%, Giliran N = 1%
+        const contribution = (targetAmount * percentage) / 100;
+        contributions.push(Math.round(contribution));
+    }
+
+    return contributions;
+
+};
 
 const CreateArisan: React.FC = () => {
     const navigate = useNavigate();
@@ -33,6 +54,84 @@ const CreateArisan: React.FC = () => {
     const [nominal, setNominal] = useState('');
     const [period, setPeriod] = useState<ArisanPeriod>('bulanan');
     const [totalMembers, setTotalMembers] = useState('10');
+    const [disbursementDate, setDisbursementDate] = useState('1');
+    const [paymentDeadline, setPaymentDeadline] = useState('25');
+    const [mode, setMode] = useState<ArisanMode>('tetap');
+    const [targetAmount, setTargetAmount] = useState('');
+    const [adminFee, setAdminFee] = useState('10000'); // Biaya administrasi
+    const [selisihPeriod, setSelisihPeriod] = useState<1 | 4 | 6>(1); // Periode perubahan selisih
+    // Manual selisih per period - array of values for each period chunk
+    const [selisihPerPeriod, setSelisihPerPeriod] = useState<string[]>(['50000', '45000', '40000']);
+
+    // Calculate number of periods based on total members and period type
+    const periodCount = useMemo(() => {
+        const n = parseInt(totalMembers) || 12;
+        if (selisihPeriod === 1) return 1;
+        return Math.ceil(n / selisihPeriod);
+    }, [totalMembers, selisihPeriod]);
+
+    // Update selisih array when period count changes
+    const updateSelisihForPeriod = (index: number, value: string) => {
+        const newSelisih = [...selisihPerPeriod];
+        while (newSelisih.length <= index) {
+            newSelisih.push('50000');
+        }
+        newSelisih[index] = value;
+        setSelisihPerPeriod(newSelisih);
+    };
+
+    // Calculate contribution preview for menurun mode with manual selisih per period
+    // Giliran 1 = tertinggi, selisih mulai dikurangi dari giliran 2
+    const contributionPreview = useMemo(() => {
+        if (mode === 'menurun' && parseInt(targetAmount) > 0 && parseInt(totalMembers) >= 2) {
+            const n = parseInt(totalMembers);
+            const target = parseInt(targetAmount);
+            const admin = parseInt(adminFee) || 0;
+
+            // Get selisih for the gap BETWEEN position-1 and position
+            // Gap 1 = between turn 1 and turn 2, uses selisih for period 1
+            const getSelisihForGap = (gapIndex: number): number => {
+                if (selisihPeriod === 1) {
+                    return parseInt(selisihPerPeriod[0]) || 0;
+                } else {
+                    // gapIndex 1 (turn 1->2) uses period 0's selisih
+                    // gapIndex 5 (turn 5->6) uses period 1's selisih for 4-month periods
+                    const periodIndex = Math.floor(gapIndex / selisihPeriod);
+                    return parseInt(selisihPerPeriod[periodIndex]) || 0;
+                }
+            };
+
+            // Calculate total of all selisih to find base contribution
+            // Base = (Target + sum of all reductions) / n
+            let totalSelisihSum = 0;
+            for (let gap = 1; gap < n; gap++) {
+                // Each gap affects (n - gap) members
+                totalSelisihSum += getSelisihForGap(gap) * (n - gap);
+            }
+
+            // base = (target + totalSelisihSum) / n
+            // So: Turn 1 = base, Turn 2 = base - selisih[1], etc.
+            const baseContribution = Math.round((target + totalSelisihSum) / n);
+
+            const contributions: number[] = [];
+            let cumulativeReduction = 0;
+
+            for (let i = 1; i <= n; i++) {
+                // Turn 1 = base + admin (highest)
+                // Turn 2 = base - selisih[gap1] + admin
+                // Turn 3 = base - selisih[gap1] - selisih[gap2] + admin
+                const contribution = baseContribution - cumulativeReduction + admin;
+                contributions.push(Math.max(0, contribution));
+
+                // Add selisih for next gap (between turn i and turn i+1)
+                if (i < n) {
+                    cumulativeReduction += getSelisihForGap(i);
+                }
+            }
+            return contributions;
+        }
+        return [];
+    }, [mode, targetAmount, totalMembers, adminFee, selisihPeriod, selisihPerPeriod]);
 
     // Members state
     const [members, setMembers] = useState<MemberInput[]>([
@@ -47,7 +146,10 @@ const CreateArisan: React.FC = () => {
     const canProceed = () => {
         switch (step) {
             case 1:
-                return name.trim() && parseInt(nominal) > 0 && parseInt(totalMembers) >= 2;
+                const hasValidAmount = mode === 'tetap'
+                    ? parseInt(nominal) > 0
+                    : parseInt(targetAmount) > 0;
+                return name.trim() && hasValidAmount && parseInt(totalMembers) >= 2;
             case 2:
                 return members.length >= 1 && members.every(m => m.name.trim());
             case 3:
@@ -118,17 +220,35 @@ const CreateArisan: React.FC = () => {
     const handleSubmit = async () => {
         setIsLoading(true);
         try {
+            // Calculate contributions based on mode
+            const getContribution = (memberName: string, memberContribution: string): number => {
+                if (mode === 'menurun') {
+                    const turnIndex = turnOrder.indexOf(memberName);
+                    if (turnIndex >= 0 && contributionPreview[turnIndex]) {
+                        return contributionPreview[turnIndex];
+                    }
+                }
+                return parseInt(memberContribution) || parseInt(nominal) || 0;
+            };
+
             const formData: CreateArisanFormData = {
                 name,
-                nominal: parseInt(nominal),
+                nominal: mode === 'tetap' ? parseInt(nominal) : (contributionPreview[0] || 0),
                 period,
                 totalMembers: parseInt(totalMembers),
+                disbursementDate: parseInt(disbursementDate),
+                paymentDeadline: parseInt(paymentDeadline),
+                mode,
+                targetAmount: mode === 'menurun' ? parseInt(targetAmount) : undefined,
+                selisihPeriod: mode === 'menurun' ? selisihPeriod : undefined,
+                selisihPerPeriod: mode === 'menurun' ? selisihPerPeriod.map(s => parseInt(s) || 0) : undefined,
+                adminFee: mode === 'menurun' ? parseInt(adminFee) || 0 : undefined,
                 members: members.map(m => ({
                     name: m.name,
                     phone: m.phone,
                     role: m.role,
                     turnOrder: turnOrder.indexOf(m.name) + 1,
-                    contributionAmount: parseInt(m.contributionAmount) || parseInt(nominal),
+                    contributionAmount: getContribution(m.name, m.contributionAmount),
                 })) as Omit<Member, 'id' | 'joinedAt' | 'status'>[],
                 turnMethod,
                 turnOrder,
@@ -216,23 +336,73 @@ const CreateArisan: React.FC = () => {
                             />
                         </div>
 
+                        {/* Mode Arisan */}
                         <div className="form-group">
-                            <label className="form-label">Nominal Setoran Awal</label>
-                            <div style={{ position: 'relative' }}>
-                                <span style={{ position: 'absolute', left: 16, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }}>
-                                    Rp
-                                </span>
-                                <input
-                                    type="text"
-                                    inputMode="numeric"
-                                    className="form-input"
-                                    placeholder="500.000"
-                                    value={formatNominal(nominal)}
-                                    onChange={(e) => setNominal(e.target.value.replace(/\D/g, ''))}
-                                    style={{ paddingLeft: 48 }}
-                                />
+                            <label className="form-label">Tipe Arisan</label>
+                            <div className="grid grid-cols-2 gap-md">
+                                <button
+                                    type="button"
+                                    className={`card card-body text-center ${mode === 'tetap' ? 'card-glass' : ''}`}
+                                    style={mode === 'tetap' ? { borderColor: 'var(--primary)', background: 'var(--primary-bg)' } : {}}
+                                    onClick={() => setMode('tetap')}
+                                >
+                                    <DollarSign size={24} className={mode === 'tetap' ? 'text-primary-color' : 'text-muted'} />
+                                    <span className="font-medium mt-sm">Tetap</span>
+
+                                </button>
+                                <button
+                                    type="button"
+                                    className={`card card-body text-center ${mode === 'menurun' ? 'card-glass' : ''}`}
+                                    style={mode === 'menurun' ? { borderColor: 'var(--primary)', background: 'var(--primary-bg)' } : {}}
+                                    onClick={() => setMode('menurun')}
+                                >
+                                    <TrendingDown size={24} className={mode === 'menurun' ? 'text-primary-color' : 'text-muted'} />
+                                    <span className="font-medium mt-sm">Menurun</span>
+
+                                </button>
                             </div>
                         </div>
+
+                        {/* Conditional Input based on Mode */}
+                        {mode === 'tetap' ? (
+                            <div className="form-group">
+                                <label className="form-label">Nominal Setoran</label>
+                                <div style={{ position: 'relative' }}>
+                                    <span style={{ position: 'absolute', left: 16, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }}>
+                                        Rp
+                                    </span>
+                                    <input
+                                        type="text"
+                                        inputMode="numeric"
+                                        className="form-input"
+                                        placeholder="500.000"
+                                        value={formatNominal(nominal)}
+                                        onChange={(e) => setNominal(e.target.value.replace(/\D/g, ''))}
+                                        style={{ paddingLeft: 48 }}
+                                    />
+                                </div>
+                                <p className="form-helper">Setoran sama untuk semua anggota</p>
+                            </div>
+                        ) : (
+                            <div className="form-group">
+                                <label className="form-label">Target Pencairan per Bulan</label>
+                                <div style={{ position: 'relative' }}>
+                                    <span style={{ position: 'absolute', left: 16, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }}>
+                                        Rp
+                                    </span>
+                                    <input
+                                        type="text"
+                                        inputMode="numeric"
+                                        className="form-input"
+                                        placeholder="10.000.000"
+                                        value={formatNominal(targetAmount)}
+                                        onChange={(e) => setTargetAmount(e.target.value.replace(/\D/g, ''))}
+                                        style={{ paddingLeft: 48 }}
+                                    />
+                                </div>
+                                <p className="form-helper">Target yang diterima pemenang setiap bulan</p>
+                            </div>
+                        )}
 
                         <div className="form-group">
                             <label className="form-label">Periode</label>
@@ -272,6 +442,200 @@ const CreateArisan: React.FC = () => {
                             />
                             <p className="form-helper">Minimum 2 anggota</p>
                         </div>
+
+                        {/* Jadwal Bulanan */}
+                        <div className="grid grid-cols-2 gap-md">
+                            <div className="form-group">
+                                <label className="form-label">Tanggal Pencairan</label>
+                                <select
+                                    className="form-input"
+                                    value={disbursementDate}
+                                    onChange={(e) => setDisbursementDate(e.target.value)}
+                                >
+                                    {Array.from({ length: 31 }, (_, i) => i + 1).map(day => (
+                                        <option key={day} value={day}>
+                                            Tanggal {day}
+                                        </option>
+                                    ))}
+                                </select>
+                                <p className="form-helper">Tanggal penerimaan arisan</p>
+                            </div>
+
+                            <div className="form-group">
+                                <label className="form-label">Batas Pembayaran</label>
+                                <select
+                                    className="form-input"
+                                    value={paymentDeadline}
+                                    onChange={(e) => setPaymentDeadline(e.target.value)}
+                                >
+                                    {Array.from({ length: 31 }, (_, i) => i + 1).map(day => (
+                                        <option key={day} value={day}>
+                                            Tanggal {day}
+                                        </option>
+                                    ))}
+                                </select>
+                                <p className="form-helper">Batas setor iuran</p>
+                            </div>
+                        </div>
+
+                        {/* Simulation Table for Menurun Mode */}
+                        {mode === 'menurun' && (
+                            <div className="card card-body mt-lg">
+                                <h4 className="font-semibold mb-md flex items-center gap-sm">
+                                    <TrendingDown size={18} />
+                                    Simulasi Setoran Menurun
+                                </h4>
+
+                                {/* Periode Selisih */}
+                                <div className="form-group mb-md">
+                                    <label className="form-label">Periode Perubahan Selisih</label>
+                                    <div className="grid grid-cols-3 gap-sm">
+                                        <button
+                                            type="button"
+                                            className={`card card-body text-center p-sm ${selisihPeriod === 1 ? 'card-glass' : ''}`}
+                                            style={selisihPeriod === 1 ? { borderColor: 'var(--primary)', background: 'var(--primary-bg)' } : {}}
+                                            onClick={() => setSelisihPeriod(1)}
+                                        >
+                                            <span className="font-medium text-sm">Per 1 Bulan</span>
+                                            <span className="text-xs text-muted">Tetap</span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className={`card card-body text-center p-sm ${selisihPeriod === 4 ? 'card-glass' : ''}`}
+                                            style={selisihPeriod === 4 ? { borderColor: 'var(--primary)', background: 'var(--primary-bg)' } : {}}
+                                            onClick={() => setSelisihPeriod(4)}
+                                        >
+                                            <span className="font-medium text-sm">Per 4 Bulan</span>
+                                            <span className="text-xs text-muted">Bertahap</span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className={`card card-body text-center p-sm ${selisihPeriod === 6 ? 'card-glass' : ''}`}
+                                            style={selisihPeriod === 6 ? { borderColor: 'var(--primary)', background: 'var(--primary-bg)' } : {}}
+                                            onClick={() => setSelisihPeriod(6)}
+                                        >
+                                            <span className="font-medium text-sm">Per 6 Bulan</span>
+                                            <span className="text-xs text-muted">Bertahap</span>
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {/* Input Selisih per Periode & Admin Fee */}
+                                <div className="mb-md">
+                                    <label className="form-label mb-sm">Selisih per Periode</label>
+                                    <div className={`grid ${selisihPeriod === 1 ? 'grid-cols-1' : periodCount <= 2 ? 'grid-cols-2' : 'grid-cols-3'} gap-sm`}>
+                                        {Array.from({ length: periodCount }, (_, i) => {
+                                            const start = i * selisihPeriod + 1;
+                                            const end = Math.min((i + 1) * selisihPeriod, parseInt(totalMembers));
+                                            const label = selisihPeriod === 1
+                                                ? 'Selisih Tetap'
+                                                : `Bln ${start}-${end}`;
+                                            return (
+                                                <div key={i} className="form-group">
+                                                    <label className="text-xs text-muted">{label}</label>
+                                                    <div style={{ position: 'relative' }}>
+                                                        <span style={{ position: 'absolute', left: 8, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                                                            Rp
+                                                        </span>
+                                                        <input
+                                                            type="text"
+                                                            inputMode="numeric"
+                                                            className="form-input"
+                                                            placeholder="50.000"
+                                                            value={formatNominal(selisihPerPeriod[i] || '50000')}
+                                                            onChange={(e) => updateSelisihForPeriod(i, e.target.value.replace(/\D/g, ''))}
+                                                            style={{ paddingLeft: 32, fontSize: '0.9rem' }}
+                                                        />
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+
+                                {/* Biaya Admin */}
+                                <div className="form-group mb-md">
+                                    <label className="form-label">Biaya Administrasi</label>
+                                    <div style={{ position: 'relative', maxWidth: '200px' }}>
+                                        <span style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                                            Rp
+                                        </span>
+                                        <input
+                                            type="text"
+                                            inputMode="numeric"
+                                            className="form-input"
+                                            placeholder="10.000"
+                                            value={formatNominal(adminFee)}
+                                            onChange={(e) => setAdminFee(e.target.value.replace(/\D/g, ''))}
+                                            style={{ paddingLeft: 36 }}
+                                        />
+                                    </div>
+                                    <p className="form-helper">Ditambahkan ke setiap setoran</p>
+                                </div>
+
+
+                                {contributionPreview.length > 0 && (
+                                    <>
+                                        <p className="text-sm text-muted mb-md">
+                                            Target: {formatCurrency(parseInt(targetAmount))} / bulan
+                                        </p>
+
+                                        {/* Table Header */}
+                                        <div className="flex justify-between items-center p-sm mb-xs" style={{ background: 'var(--primary-bg)', borderRadius: 'var(--radius-sm)', fontWeight: 600, fontSize: '0.85rem' }}>
+                                            <div style={{ width: '25%' }}>Giliran</div>
+                                            <div style={{ width: '35%', textAlign: 'right' }}>Setoran</div>
+                                            <div style={{ width: '40%', textAlign: 'right' }}>Selisih</div>
+                                        </div>
+
+                                        <div className="flex flex-col gap-xs" style={{ maxHeight: '280px', overflowY: 'auto' }}>
+                                            {contributionPreview.map((amount, index) => {
+                                                const prevAmount = index > 0 ? contributionPreview[index - 1] : null;
+                                                const selisih = prevAmount ? prevAmount - amount : 0;
+                                                return (
+                                                    <div key={index} className="flex justify-between items-center p-sm" style={{ background: 'var(--bg-secondary)', borderRadius: 'var(--radius-sm)' }}>
+                                                        <div style={{ width: '25%' }} className="flex items-center gap-sm">
+                                                            <span className="avatar avatar-sm" style={{ width: 24, height: 24, fontSize: 11 }}>
+                                                                {index + 1}
+                                                            </span>
+                                                            <span className="text-sm">ke-{index + 1}</span>
+                                                        </div>
+                                                        <div style={{ width: '35%', textAlign: 'right' }}>
+                                                            <span className="font-semibold" style={{ color: index === 0 ? 'var(--primary)' : index === contributionPreview.length - 1 ? 'var(--success)' : 'inherit' }}>
+                                                                {formatCurrency(amount)}
+                                                            </span>
+                                                        </div>
+                                                        <div style={{ width: '40%', textAlign: 'right' }}>
+                                                            {index === 0 ? (
+                                                                <span className="text-xs text-muted">Max</span>
+                                                            ) : (
+                                                                <span className="text-sm text-error">-{formatCurrency(selisih)}</span>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+
+                                        {/* Summary */}
+                                        <div className="mt-md p-sm" style={{ background: 'var(--primary-bg)', borderRadius: 'var(--radius-md)' }}>
+                                            <div className="flex justify-between items-center mb-xs">
+                                                <span className="text-sm">Total per Putaran:</span>
+                                                <span className="font-semibold">{formatCurrency(contributionPreview.reduce((a, b) => a + b, 0))}</span>
+                                            </div>
+                                            <div className="flex justify-between items-center">
+                                                <span className="text-sm">Target Pencairan:</span>
+                                                <span className="font-semibold">{formatCurrency(parseInt(targetAmount))}</span>
+                                            </div>
+                                            {contributionPreview.reduce((a, b) => a + b, 0) !== parseInt(targetAmount) && (
+                                                <div className="mt-xs text-xs text-warning">
+                                                    ⚠️ Total tidak sama dengan target. Sesuaikan selisih nominal.
+                                                </div>
+                                            )}
+                                        </div>
+                                    </>
+                                )}
+                            </div>
+                        )}
                     </div>
                 )}
 
@@ -312,14 +676,19 @@ const CreateArisan: React.FC = () => {
                                     <span style={{ position: 'absolute', left: 16, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }}>Rp</span>
                                     <input
                                         type="text"
-                                        inputMode="numeric"
                                         className="form-input"
-                                        placeholder="Iuran Bulanan"
-                                        value={formatNominal(members[0].contributionAmount)}
-                                        onChange={(e) => handleMemberChange(0, 'contributionAmount', e.target.value.replace(/\D/g, ''))}
-                                        style={{ paddingLeft: 48 }}
+                                        value={mode === 'menurun' && contributionPreview[0]
+                                            ? formatNominal(contributionPreview[0].toString())
+                                            : formatNominal(nominal)}
+                                        readOnly
+                                        style={{ paddingLeft: 48, background: 'var(--bg-secondary)', cursor: 'default' }}
                                     />
                                 </div>
+                                <p className="form-helper text-xs mt-xs">
+                                    {mode === 'menurun'
+                                        ? '📊 Iuran dari simulasi (giliran ke-1)'
+                                        : '📊 Iuran tetap untuk semua anggota'}
+                                </p>
                             </div>
                         </div>
 
@@ -402,12 +771,13 @@ const CreateArisan: React.FC = () => {
                                                 <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', fontSize: 'var(--font-size-sm)' }}>Rp</span>
                                                 <input
                                                     type="text"
-                                                    inputMode="numeric"
                                                     className="form-input"
-                                                    placeholder="Iuran"
-                                                    value={formatNominal(member.contributionAmount)}
-                                                    onChange={(e) => handleMemberChange(index + 1, 'contributionAmount', e.target.value.replace(/\D/g, ''))}
-                                                    style={{ paddingLeft: 36 }}
+                                                    value={mode === 'menurun' && contributionPreview[index + 1]
+                                                        ? formatNominal(contributionPreview[index + 1].toString())
+                                                        : formatNominal(nominal)}
+                                                    readOnly
+                                                    style={{ paddingLeft: 36, background: 'var(--bg-tertiary)', cursor: 'default', fontSize: '0.85rem' }}
+                                                    title={mode === 'menurun' ? `Iuran giliran ke-${index + 2}` : 'Iuran tetap'}
                                                 />
                                             </div>
                                         </div>
@@ -452,7 +822,7 @@ const CreateArisan: React.FC = () => {
                             >
                                 <GripVertical size={24} className={turnMethod === 'manual' ? 'text-primary-color' : 'text-muted'} />
                                 <span className="font-medium mt-sm">Manual</span>
-                                <span className="text-xs text-muted">Atur sendiri</span>
+
                             </button>
                             <button
                                 type="button"
@@ -465,7 +835,7 @@ const CreateArisan: React.FC = () => {
                             >
                                 <Shuffle size={24} className={turnMethod === 'undian' ? 'text-primary-color' : 'text-muted'} />
                                 <span className="font-medium mt-sm">Undian</span>
-                                <span className="text-xs text-muted">Acak otomatis</span>
+
                             </button>
                         </div>
 

@@ -156,16 +156,22 @@ export const ArisanProvider: React.FC<{ children: ReactNode }> = ({ children }) 
 
             setArisans(arisanList);
 
-            // Fetch payments
-            const paymentsQuery = query(collection(db, 'payments'), where('userId', '==', user.id));
-            const paymentsSnap = await getDocs(paymentsQuery);
-            const paymentsList = paymentsSnap.docs.map(p => ({
-                id: p.id,
-                ...p.data(),
-                submittedAt: p.data().submittedAt ? toDate(p.data().submittedAt) : undefined,
-                approvedAt: p.data().approvedAt ? toDate(p.data().approvedAt) : undefined,
-                paidAt: p.data().paidAt ? toDate(p.data().paidAt) : undefined,
-            })) as Payment[];
+            // Fetch ALL payments for user's arisans (not just user's payments)
+            // This allows admin to see all payments from all members
+            const paymentsList: Payment[] = [];
+            for (const arisan of arisanList) {
+                const paymentsQuery = query(collection(db, 'payments'), where('arisanId', '==', arisan.id));
+                const paymentsSnap = await getDocs(paymentsQuery);
+                paymentsSnap.docs.forEach(p => {
+                    paymentsList.push({
+                        id: p.id,
+                        ...p.data(),
+                        submittedAt: p.data().submittedAt ? toDate(p.data().submittedAt) : undefined,
+                        approvedAt: p.data().approvedAt ? toDate(p.data().approvedAt) : undefined,
+                        paidAt: p.data().paidAt ? toDate(p.data().paidAt) : undefined,
+                    } as Payment);
+                });
+            }
             setPayments(paymentsList);
 
             // Fetch rounds for user's arisans
@@ -235,8 +241,18 @@ export const ArisanProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         if (!user) throw new Error('User not authenticated');
 
         const inviteCode = generateInviteCode();
+
+        // Calculate due date based on payment deadline
         const dueDate = new Date();
-        dueDate.setDate(dueDate.getDate() + (data.period === 'mingguan' ? 7 : 30));
+        if (data.period === 'mingguan') {
+            // Weekly: next week same day
+            dueDate.setDate(dueDate.getDate() + 7);
+        } else {
+            // Monthly: paymentDeadline of next month
+            const paymentDay = data.paymentDeadline || 25;
+            dueDate.setMonth(dueDate.getMonth() + 1);
+            dueDate.setDate(Math.min(paymentDay, new Date(dueDate.getFullYear(), dueDate.getMonth() + 1, 0).getDate()));
+        }
 
         // Create arisan document
         const arisanRef = await addDoc(collection(db, 'arisans'), {
@@ -247,8 +263,15 @@ export const ArisanProvider: React.FC<{ children: ReactNode }> = ({ children }) 
             currentRound: 1,
             status: 'aktif',
             turnMethod: data.turnMethod,
+            mode: data.mode || 'tetap',
+            targetAmount: data.targetAmount || null,
+            selisihPeriod: data.selisihPeriod || null,
+            selisihPerPeriod: data.selisihPerPeriod || null,
+            adminFee: data.adminFee || 0,
             inviteCode,
             dueDate: Timestamp.fromDate(dueDate),
+            disbursementDate: data.disbursementDate || 1,
+            paymentDeadline: data.paymentDeadline || 25,
             createdBy: user.id,
             createdAt: serverTimestamp(),
             paymentAccounts: data.paymentAccounts || [],
@@ -522,7 +545,15 @@ export const ArisanProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         const nextWinner = arisan.members.find(m => m.turnOrder === newRoundNumber);
         if (!nextWinner) return;
 
-        const newDueDate = new Date(Date.now() + (arisan.period === 'mingguan' ? 7 : 30) * 24 * 60 * 60 * 1000);
+        // Calculate due date based on payment deadline
+        const newDueDate = new Date();
+        if (arisan.period === 'mingguan') {
+            newDueDate.setDate(newDueDate.getDate() + 7);
+        } else {
+            const paymentDay = arisan.paymentDeadline || 25;
+            newDueDate.setMonth(newDueDate.getMonth() + 1);
+            newDueDate.setDate(Math.min(paymentDay, new Date(newDueDate.getFullYear(), newDueDate.getMonth() + 1, 0).getDate()));
+        }
 
         await updateArisan(arisanId, { currentRound: newRoundNumber, dueDate: newDueDate });
 
@@ -551,21 +582,66 @@ export const ArisanProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     };
 
     const submitPayment = async (arisanId: string, memberId: string, round: number): Promise<boolean> => {
-        const q = query(collection(db, 'payments'),
+        // First try to find by memberId
+        let q = query(collection(db, 'payments'),
             where('arisanId', '==', arisanId),
             where('memberId', '==', memberId),
             where('round', '==', round)
         );
-        const snapshot = await getDocs(q);
-        if (snapshot.empty) return false;
+        let snapshot = await getDocs(q);
+
+        // If not found, try to find by member name (legacy data)
+        if (snapshot.empty) {
+            const arisan = getArisanById(arisanId);
+            const member = arisan?.members.find(m => m.id === memberId);
+            if (member) {
+                q = query(collection(db, 'payments'),
+                    where('arisanId', '==', arisanId),
+                    where('memberId', '==', member.name),
+                    where('round', '==', round)
+                );
+                snapshot = await getDocs(q);
+            }
+        }
+
+        if (snapshot.empty) {
+            // Create new payment record if doesn't exist
+            const arisan = getArisanById(arisanId);
+            const member = arisan?.members.find(m => m.id === memberId);
+            if (!member || !arisan) return false;
+
+            const paymentRef = await addDoc(collection(db, 'payments'), {
+                arisanId,
+                memberId: member.id,
+                round,
+                amount: member.contributionAmount,
+                status: 'submitted',
+                userId: member.userId,
+                submittedAt: serverTimestamp(),
+            });
+
+            setPayments(prev => [...prev, {
+                id: paymentRef.id,
+                arisanId,
+                memberId: member.id,
+                round,
+                amount: member.contributionAmount,
+                status: 'submitted',
+                userId: member.userId || '',
+                submittedAt: new Date(),
+            }]);
+
+            return true;
+        }
 
         await updateDoc(snapshot.docs[0].ref, {
             status: 'submitted',
             submittedAt: serverTimestamp(),
         });
 
+        const matchedMemberId = snapshot.docs[0].data().memberId;
         setPayments(prev => prev.map(p =>
-            p.arisanId === arisanId && p.memberId === memberId && p.round === round
+            p.arisanId === arisanId && p.memberId === matchedMemberId && p.round === round
                 ? { ...p, status: 'submitted', submittedAt: new Date() }
                 : p
         ));
@@ -587,8 +663,9 @@ export const ArisanProvider: React.FC<{ children: ReactNode }> = ({ children }) 
             approvedAt: serverTimestamp(),
         });
 
+        const matchedMemberId = snapshot.docs[0].data().memberId;
         setPayments(prev => prev.map(p =>
-            p.arisanId === arisanId && p.memberId === memberId && p.round === round
+            p.arisanId === arisanId && p.memberId === matchedMemberId && p.round === round
                 ? { ...p, status: 'approved', approvedAt: new Date() }
                 : p
         ));

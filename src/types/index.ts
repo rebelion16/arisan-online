@@ -32,6 +32,7 @@ export interface Member {
 export type ArisanPeriod = 'mingguan' | 'bulanan';
 export type ArisanStatus = 'aktif' | 'selesai' | 'draft';
 export type TurnMethod = 'manual' | 'undian';
+export type ArisanMode = 'tetap' | 'menurun'; // Tetap = sama semua, Menurun = giliran awal bayar lebih
 
 export interface Arisan {
     id: string;
@@ -42,16 +43,24 @@ export interface Arisan {
     currentRound: number;
     status: ArisanStatus;
     turnMethod: TurnMethod;
+    mode?: ArisanMode; // Default: 'tetap'
+    targetAmount?: number; // Target pencairan per bulan (untuk mode menurun)
+    selisihPeriod?: 1 | 4 | 6; // Periode perubahan selisih (per berapa bulan)
+    selisihPerPeriod?: number[]; // Nilai selisih per periode
+    adminFee?: number; // Biaya administrasi per member
     inviteCode: string;
     createdBy: string;
     createdAt: Date;
     dueDate?: Date;
+    disbursementDate?: number; // Tanggal pencairan (1-31)
+    paymentDeadline?: number; // Batas pembayaran (1-31)
     members: Member[];
     paymentAccounts: PaymentAccount[];
     // Settings
     settings: ArisanSettings;
     drawHistory?: DrawRecord[]; // History of random draws
 }
+
 
 export interface ArisanSettings {
     penaltyEnabled: boolean;
@@ -143,6 +152,13 @@ export interface CreateArisanFormData {
     nominal: number;
     period: ArisanPeriod;
     totalMembers: number;
+    disbursementDate?: number; // Tanggal pencairan (1-31)
+    paymentDeadline?: number; // Batas pembayaran (1-31)
+    mode?: ArisanMode; // Default: 'tetap'
+    targetAmount?: number; // Target pencairan (untuk mode menurun)
+    selisihPeriod?: 1 | 4 | 6; // Periode perubahan selisih
+    selisihPerPeriod?: number[]; // Nilai selisih per periode
+    adminFee?: number; // Biaya administrasi
 
     // Step 2: Members
     members: Omit<Member, 'id' | 'joinedAt' | 'status'>[];

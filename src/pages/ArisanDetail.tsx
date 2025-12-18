@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
     ArrowLeft, Settings, Wallet, Calendar,
@@ -30,6 +30,23 @@ const ArisanDetail: React.FC = () => {
     const payments = arisan ? getPaymentsByRound(arisan.id, arisan.currentRound) : [];
     const rounds = arisan ? getRoundHistory(arisan.id) : [];
 
+    // Client-side overdue check - compares current date with due date
+    const isPaymentOverdue = useMemo(() => {
+        if (!arisan?.dueDate) return false;
+        const now = new Date();
+        // Handle both Date and Firestore Timestamp
+        const dueDate = arisan.dueDate instanceof Date
+            ? arisan.dueDate
+            : (arisan.dueDate as { toDate: () => Date }).toDate();
+        return now > dueDate;
+    }, [arisan?.dueDate]);
+
+    // Helper to check if a specific payment should show as overdue
+    const checkOverdueStatus = (payment: Payment): boolean => {
+        if (payment.status !== 'pending') return false;
+        return isPaymentOverdue;
+    };
+
     useEffect(() => {
         if (!arisan) {
             navigate('/dashboard');
@@ -39,13 +56,18 @@ const ArisanDetail: React.FC = () => {
     if (!arisan) return null;
 
     const currentMember = arisan.members.find(m => m.userId === user?.id);
-    const currentPayment = payments.find(p => p.memberId === currentMember?.id);
+    // Match payment by id OR name (legacy data uses name as memberId)
+    const currentPayment = payments.find(p =>
+        p.memberId === currentMember?.id || p.memberId === currentMember?.name
+    );
     const isAdmin = arisan.createdBy === user?.id;
     const currentWinner = arisan.members.find(m => m.turnOrder === arisan.currentRound);
 
-    const paidCount = payments.filter(p => p.status === 'paid').length;
+    const paidCount = payments.filter(p => p.status === 'paid' || p.status === 'approved').length;
+    const submittedCount = payments.filter(p => p.status === 'submitted').length;
     const pendingCount = payments.filter(p => p.status === 'pending').length;
-    const overdueCount = payments.filter(p => p.status === 'overdue').length;
+    // Count overdue: either status is 'overdue' OR pending but past due date (client-side check)
+    const overdueCount = payments.filter(p => p.status === 'overdue' || checkOverdueStatus(p)).length;
 
     const handleCopyLink = () => {
         const link = `${window.location.origin}/join/${arisan.inviteCode}`;
@@ -80,11 +102,20 @@ const ArisanDetail: React.FC = () => {
     const getPaymentStatusBadge = (payment: Payment) => {
         switch (payment.status) {
             case 'paid':
-                return <span className="badge badge-success"><CheckCircle size={12} /> Sudah</span>;
+            case 'approved':
+                return <span className="badge badge-success"><CheckCircle size={12} /> Lunas</span>;
+            case 'submitted':
+                return <span className="badge badge-info" style={{ background: 'rgba(59, 130, 246, 0.2)', color: '#3b82f6' }}><Clock size={12} /> Menunggu</span>;
             case 'pending':
+                // Client-side check: show as overdue if past due date
+                if (checkOverdueStatus(payment)) {
+                    return <span className="badge badge-error"><AlertCircle size={12} /> Telat</span>;
+                }
                 return <span className="badge badge-warning"><Clock size={12} /> Belum</span>;
             case 'overdue':
                 return <span className="badge badge-error"><AlertCircle size={12} /> Telat</span>;
+            default:
+                return <span className="badge badge-secondary"><Clock size={12} /> {payment.status}</span>;
         }
     };
 
@@ -148,8 +179,12 @@ const ArisanDetail: React.FC = () => {
                         {/* Stats Grid */}
                         <div className="grid grid-cols-3 gap-md mb-lg">
                             <div className="card stat-card">
-                                <div className="stat-value">{formatCurrency(arisan.nominal)}</div>
-                                <div className="stat-label">Nominal</div>
+                                <div className="stat-value">
+                                    {formatCurrency(arisan.mode === 'menurun' && arisan.targetAmount ? arisan.targetAmount : arisan.nominal)}
+                                </div>
+                                <div className="stat-label">
+                                    {arisan.mode === 'menurun' ? 'Target/Bulan' : 'Nominal'}
+                                </div>
                             </div>
                             <div className="card stat-card">
                                 <div className="stat-value">{arisan.period === 'mingguan' ? 'Minggu' : 'Bulan'}</div>
@@ -161,11 +196,29 @@ const ArisanDetail: React.FC = () => {
                             </div>
                         </div>
 
+                        {/* Schedule Info */}
+                        {arisan.period === 'bulanan' && (arisan.disbursementDate || arisan.paymentDeadline) && (
+                            <div className="card card-body mb-lg" style={{ background: 'var(--bg-secondary)' }}>
+                                <div className="grid grid-cols-2 gap-md text-center">
+                                    <div>
+                                        <div className="text-2xl mb-xs">📅</div>
+                                        <div className="font-semibold">Tanggal {arisan.disbursementDate || 1}</div>
+                                        <div className="text-sm text-muted">Pencairan</div>
+                                    </div>
+                                    <div>
+                                        <div className="text-2xl mb-xs">⏰</div>
+                                        <div className="font-semibold">Tanggal {arisan.paymentDeadline || 25}</div>
+                                        <div className="text-sm text-muted">Batas Bayar</div>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
                         {/* Current Round Info */}
                         <div className="card card-body mb-lg">
                             <h3 className="font-semibold mb-md flex items-center gap-sm">
                                 <Calendar size={18} />
-                                Putaran ke-{arisan.currentRound}
+                                Pencairan Arisan ke-{arisan.currentRound}
                             </h3>
 
                             {currentWinner && (
@@ -175,18 +228,29 @@ const ArisanDetail: React.FC = () => {
                                     </div>
                                     <div className="list-item-content">
                                         <div className="list-item-title">Giliran: {currentWinner.name}</div>
-                                        <div className="list-item-subtitle">
-                                            {arisan.dueDate && `Jatuh tempo: ${formatShortDate(arisan.dueDate)}`}
+                                        <div className="list-item-subtitle flex flex-col gap-xs">
+                                            {arisan.disbursementDate && (
+                                                <span>📅 Pencairan: Tanggal {arisan.disbursementDate} setiap {arisan.period === 'mingguan' ? 'minggu' : 'bulan'}</span>
+                                            )}
+                                            {arisan.dueDate && (
+                                                <span>⏰ Batas bayar: {formatShortDate(arisan.dueDate)}</span>
+                                            )}
                                         </div>
                                     </div>
                                 </div>
                             )}
 
-                            <div className="flex gap-md mt-md">
+                            <div className="flex flex-wrap gap-md mt-md">
                                 <div className="flex items-center gap-xs text-success">
                                     <CheckCircle size={16} />
-                                    <span className="text-sm">{paidCount} sudah bayar</span>
+                                    <span className="text-sm">{paidCount} lunas</span>
                                 </div>
+                                {submittedCount > 0 && (
+                                    <div className="flex items-center gap-xs" style={{ color: '#3b82f6' }}>
+                                        <Clock size={16} />
+                                        <span className="text-sm">{submittedCount} menunggu</span>
+                                    </div>
+                                )}
                                 <div className="flex items-center gap-xs text-warning">
                                     <Clock size={16} />
                                     <span className="text-sm">{pendingCount} belum</span>
@@ -216,29 +280,49 @@ const ArisanDetail: React.FC = () => {
                                     </div>
                                     <div className="flex justify-between items-center">
                                         <span className="text-secondary">Status Bayar</span>
-                                        {currentPayment && getPaymentStatusBadge(currentPayment)}
+                                        {currentPayment ? (
+                                            getPaymentStatusBadge(currentPayment)
+                                        ) : (
+                                            <span className="badge badge-warning"><Clock size={12} /> Belum</span>
+                                        )}
                                     </div>
                                 </div>
 
-                                {/* Rekening Admin untuk Transfer */}
-                                {arisan.paymentAccounts.length > 0 && currentPayment?.status === 'pending' && (
+                                {/* Rekening Admin untuk Transfer - show when pending or no payment yet */}
+                                {arisan.paymentAccounts.length > 0 && (!currentPayment || currentPayment.status === 'pending') && (
                                     <div className="mt-md p-sm" style={{ background: 'var(--bg-secondary)', borderRadius: 'var(--radius-md)' }}>
                                         <h4 className="text-sm font-semibold mb-sm">📋 Rekening Pembayaran</h4>
-                                        <div className="flex flex-col gap-xs">
+                                        <div className="flex flex-col gap-sm">
                                             {arisan.paymentAccounts.filter(acc => acc.isActive).map(acc => (
-                                                <div key={acc.id} className="flex justify-between items-center text-sm">
-                                                    <span className="text-secondary">{acc.type === 'bank' ? '🏦' : '📱'} {acc.bankName}</span>
-                                                    <div className="text-right">
-                                                        <div className="font-semibold">{acc.accountNumber}</div>
+                                                <div key={acc.id} className="flex justify-between items-center text-sm p-sm" style={{ background: 'var(--bg-primary)', borderRadius: 'var(--radius-sm)' }}>
+                                                    <div className="flex-1">
+                                                        <div className="flex items-center gap-xs font-semibold">
+                                                            <span>{acc.type === 'bank' ? '🏦' : '📱'}</span>
+                                                            <span>{acc.bankName}</span>
+                                                        </div>
+                                                        <div className="text-base font-bold" style={{ fontFamily: 'monospace' }}>{acc.accountNumber}</div>
                                                         <div className="text-xs text-muted">a.n. {acc.accountHolder}</div>
                                                     </div>
+                                                    <button
+                                                        onClick={() => {
+                                                            navigator.clipboard.writeText(acc.accountNumber);
+                                                            showToast('Nomor rekening disalin! 📋', 'success');
+                                                        }}
+                                                        className="btn btn-sm btn-secondary"
+                                                        style={{ padding: '8px 12px' }}
+                                                        title="Salin Rekening"
+                                                    >
+                                                        <Copy size={14} />
+                                                        Salin
+                                                    </button>
                                                 </div>
                                             ))}
                                         </div>
                                     </div>
                                 )}
 
-                                {currentPayment?.status === 'pending' && (
+                                {/* Show button when pending or no payment record exists */}
+                                {(!currentPayment || currentPayment.status === 'pending') && (
                                     <button
                                         onClick={handleConfirmPayment}
                                         className="btn btn-primary w-full mt-lg"
@@ -254,9 +338,9 @@ const ArisanDetail: React.FC = () => {
                                     </div>
                                 )}
 
-                                {currentPayment?.status === 'approved' && (
+                                {(currentPayment?.status === 'approved' || currentPayment?.status === 'paid') && (
                                     <div className="mt-md p-sm text-center" style={{ background: 'rgba(34, 197, 94, 0.1)', borderRadius: 'var(--radius-md)' }}>
-                                        <span className="text-success text-sm">✅ Pembayaran dikonfirmasi admin</span>
+                                        <span className="text-success text-sm">✅ Pembayaran sudah lunas</span>
                                     </div>
                                 )}
                             </div>
@@ -411,66 +495,88 @@ const ArisanDetail: React.FC = () => {
                 {/* Tab: Anggota */}
                 {activeTab === 'anggota' && (
                     <div className="animate-fade-in">
-                        <div className="flex flex-col gap-sm">
-                            {arisan.members
-                                .sort((a, b) => a.turnOrder - b.turnOrder)
-                                .map(member => {
-                                    const payment = payments.find(p => p.memberId === member.id);
-                                    const isCurrentUser = member.userId === user?.id;
+                        {arisan.members.length === 0 ? (
+                            <div className="empty-state">
+                                <div className="empty-state-icon">👥</div>
+                                <p className="empty-state-title">Belum Ada Anggota</p>
+                                <p className="empty-state-desc">Bagikan link undangan untuk menambah anggota</p>
+                            </div>
+                        ) : (
+                            <div className="flex flex-col gap-sm">
+                                {arisan.members
+                                    .sort((a, b) => a.turnOrder - b.turnOrder)
+                                    .map(member => {
+                                        // Match payment by id OR name (legacy data uses name as memberId)
+                                        const payment = payments.find(p =>
+                                            p.memberId === member.id || p.memberId === member.name
+                                        );
+                                        const isCurrentUser = member.userId === user?.id;
 
-                                    return (
-                                        <div
-                                            key={member.id}
-                                            className="card list-item"
-                                            style={isCurrentUser ? { borderColor: 'var(--primary)' } : undefined}
-                                        >
-                                            <div className="avatar">
-                                                {member.turnOrder}
-                                            </div>
-                                            <div className="list-item-content">
-                                                <div className="list-item-title flex items-center gap-sm">
-                                                    {member.name}
-                                                    {isCurrentUser && <span className="text-xs text-muted">(Kamu)</span>}
-                                                    {member.role === 'ketua' && <Crown size={14} className="text-warning" />}
+                                        return (
+                                            <div
+                                                key={member.id}
+                                                className="card list-item"
+                                                style={isCurrentUser ? { borderColor: 'var(--primary)' } : undefined}
+                                            >
+                                                <div className="avatar">
+                                                    {member.turnOrder}
                                                 </div>
-                                                <div className="list-item-subtitle flex items-center gap-sm">
-                                                    <span className="badge badge-secondary">{member.role}</span>
-                                                    <span className="text-xs">{formatCurrency(member.contributionAmount)}</span>
-                                                    {member.phone && (
-                                                        <a href={`tel:${member.phone}`} className="flex items-center gap-xs">
-                                                            <Phone size={12} />
-                                                        </a>
+                                                <div className="list-item-content">
+                                                    <div className="list-item-title flex items-center gap-sm">
+                                                        {member.name}
+                                                        {isCurrentUser && <span className="text-xs text-muted">(Kamu)</span>}
+                                                        {member.role === 'ketua' && <Crown size={14} className="text-warning" />}
+                                                    </div>
+                                                    <div className="list-item-subtitle flex items-center gap-sm">
+                                                        <span className="badge badge-secondary">{member.role}</span>
+                                                        <span className="text-xs">{formatCurrency(member.contributionAmount)}</span>
+                                                        {member.phone && (
+                                                            <a href={`tel:${member.phone}`} className="flex items-center gap-xs">
+                                                                <Phone size={12} />
+                                                            </a>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                                <div className="flex items-center gap-xs">
+                                                    {payment && getPaymentStatusBadge(payment)}
+                                                    {/* Admin: Confirm payment button for submitted status */}
+                                                    {isAdmin && payment?.status === 'submitted' && (
+                                                        <button
+                                                            onClick={() => handleApprovePayment(payment.memberId)}
+                                                            className="btn btn-sm btn-primary"
+                                                            style={{ padding: '4px 8px' }}
+                                                            title="Konfirmasi Setoran"
+                                                        >
+                                                            <Check size={14} />
+                                                        </button>
+                                                    )}
+                                                    {/* Admin: Reorder buttons */}
+                                                    {isAdmin && (
+                                                        <div className="flex flex-col">
+                                                            <button
+                                                                onClick={() => updateMemberOrder(arisan.id, member.id, 'up')}
+                                                                className="btn btn-ghost btn-sm"
+                                                                style={{ padding: '2px' }}
+                                                                disabled={member.turnOrder === 1}
+                                                            >
+                                                                <ChevronUp size={14} />
+                                                            </button>
+                                                            <button
+                                                                onClick={() => updateMemberOrder(arisan.id, member.id, 'down')}
+                                                                className="btn btn-ghost btn-sm"
+                                                                style={{ padding: '2px' }}
+                                                                disabled={member.turnOrder === arisan.members.length}
+                                                            >
+                                                                <ChevronDown size={14} />
+                                                            </button>
+                                                        </div>
                                                     )}
                                                 </div>
                                             </div>
-                                            <div className="flex items-center gap-xs">
-                                                {payment && getPaymentStatusBadge(payment)}
-                                                {/* Admin: Reorder buttons */}
-                                                {isAdmin && (
-                                                    <div className="flex flex-col">
-                                                        <button
-                                                            onClick={() => updateMemberOrder(arisan.id, member.id, 'up')}
-                                                            className="btn btn-ghost btn-sm"
-                                                            style={{ padding: '2px' }}
-                                                            disabled={member.turnOrder === 1}
-                                                        >
-                                                            <ChevronUp size={14} />
-                                                        </button>
-                                                        <button
-                                                            onClick={() => updateMemberOrder(arisan.id, member.id, 'down')}
-                                                            className="btn btn-ghost btn-sm"
-                                                            style={{ padding: '2px' }}
-                                                            disabled={member.turnOrder === arisan.members.length}
-                                                        >
-                                                            <ChevronDown size={14} />
-                                                        </button>
-                                                    </div>
-                                                )}
-                                            </div>
-                                        </div>
-                                    );
-                                })}
-                        </div>
+                                        );
+                                    })}
+                            </div>
+                        )}
                     </div>
                 )}
 
@@ -479,33 +585,66 @@ const ArisanDetail: React.FC = () => {
                     <div className="animate-fade-in">
                         {rounds.length > 0 ? (
                             <div className="flex flex-col gap-md">
-                                {rounds.map(round => (
-                                    <div key={round.id} className="card card-body">
-                                        <div className="flex justify-between items-start mb-sm">
-                                            <div>
-                                                <h4 className="font-semibold">Putaran ke-{round.roundNumber}</h4>
-                                                <p className="text-sm text-muted">{formatDate(round.dueDate)}</p>
-                                            </div>
-                                            {round.completedAt ? (
-                                                <span className="badge badge-success">Selesai</span>
-                                            ) : (
-                                                <span className="badge badge-warning">Berjalan</span>
-                                            )}
-                                        </div>
+                                {rounds.map(round => {
+                                    // Calculate total collected from payments for this round
+                                    const roundPayments = payments.filter(p =>
+                                        p.arisanId === arisan.id &&
+                                        p.round === round.roundNumber &&
+                                        (p.status === 'approved' || p.status === 'paid')
+                                    );
+                                    // Subtract adminFee from each payment to get base contribution (setoran pokok)
+                                    const adminFee = arisan.adminFee || 0;
+                                    const totalCollected = roundPayments.reduce((sum, p) => sum + (p.amount - adminFee), 0);
+                                    // For menurun mode, use targetAmount (target pencairan per bulan)
+                                    // For tetap mode, use nominal × totalMembers
+                                    const targetAmount = arisan.mode === 'menurun' && arisan.targetAmount
+                                        ? arisan.targetAmount
+                                        : arisan.nominal * arisan.totalMembers;
 
-                                        <div className="list-item" style={{ background: 'var(--bg-secondary)', border: 'none' }}>
-                                            <div className="avatar avatar-sm">
-                                                <Crown size={14} />
+                                    return (
+                                        <div key={round.id} className="card card-body">
+                                            <div className="flex justify-between items-start mb-sm">
+                                                <div>
+                                                    <h4 className="font-semibold">Pencairan Arisan ke-{round.roundNumber}</h4>
+                                                    <div className="flex flex-col gap-xs">
+                                                        {arisan.disbursementDate && (
+                                                            <p className="text-sm text-muted">
+                                                                📅 Pencairan: Tanggal {arisan.disbursementDate}
+                                                            </p>
+                                                        )}
+                                                        <p className="text-sm text-muted">
+                                                            ⏰ Batas bayar: {formatDate(round.dueDate)}
+                                                        </p>
+                                                    </div>
+                                                </div>
+                                                {round.completedAt ? (
+                                                    <span className="badge badge-success">Selesai</span>
+                                                ) : (
+                                                    <span className="badge badge-warning">Berjalan</span>
+                                                )}
                                             </div>
-                                            <div className="list-item-content">
-                                                <div className="text-sm font-medium">Giliran: {round.winnerName}</div>
-                                                <div className="text-xs text-muted">
-                                                    Terkumpul: {formatCurrency(round.totalCollected)}
+
+                                            <div className="list-item" style={{ background: 'var(--bg-secondary)', border: 'none' }}>
+                                                <div className="avatar avatar-sm">
+                                                    <Crown size={14} />
+                                                </div>
+                                                <div className="list-item-content">
+                                                    <div className="text-sm font-medium">🎉 Penerima: {round.winnerName}</div>
+                                                    <div className="text-xs text-muted flex flex-col gap-xs">
+                                                        <div className="flex gap-xs items-center">
+                                                            <span>💰 Terkumpul:</span>
+                                                            <span className={totalCollected >= targetAmount ? 'text-success font-semibold' : 'text-warning font-semibold'}>
+                                                                {formatCurrency(totalCollected)}
+                                                            </span>
+                                                            <span className="text-muted">({roundPayments.length}/{arisan.totalMembers} lunas)</span>
+                                                        </div>
+                                                        <span>🎯 Target: {formatCurrency(targetAmount)}</span>
+                                                    </div>
                                                 </div>
                                             </div>
                                         </div>
-                                    </div>
-                                ))}
+                                    );
+                                })}
                             </div>
                         ) : (
                             <div className="empty-state">

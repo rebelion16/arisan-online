@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate, useParams, Link } from 'react-router-dom';
 import {
     Wallet, Users, Calendar, ArrowLeft,
@@ -7,6 +7,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { useArisan } from '../context/ArisanContext';
 import { formatCurrency } from '../data/mockData';
+import type { Arisan } from '../types';
 
 const JoinArisan: React.FC = () => {
     const navigate = useNavigate();
@@ -15,20 +16,102 @@ const JoinArisan: React.FC = () => {
     const { getArisanByInviteCode, joinArisan } = useArisan();
 
     const [inviteCode, setInviteCode] = useState(code || '');
-    const [isLoading] = useState(false);
+    const [isSearching, setIsSearching] = useState(false);
     const [error, setError] = useState('');
     const [isJoining, setIsJoining] = useState(false);
     const [contributionAmount, setContributionAmount] = useState('');
     const [fullName, setFullName] = useState('');
     const [phoneNumber, setPhoneNumber] = useState('');
+    const [arisan, setArisan] = useState<Arisan | null>(null);
+    const [selectedTurn, setSelectedTurn] = useState<number>(0);
 
-    const arisan = inviteCode.length >= 4 ? getArisanByInviteCode(inviteCode) : undefined;
+    // Calculate available turns (not yet taken)
+    const availableTurns = useMemo(() => {
+        if (!arisan) return [];
+        const takenTurns = arisan.members.map(m => m.turnOrder).filter(o => o > 0);
+        const allTurns = Array.from({ length: arisan.totalMembers }, (_, i) => i + 1);
+        return allTurns.filter(turn => !takenTurns.includes(turn));
+    }, [arisan]);
 
+    // Calculate contribution for menurun mode based on turn (using saved selisih config)
+    const calculateContributionForTurn = useMemo(() => {
+        if (!arisan || arisan.mode !== 'menurun' || !arisan.targetAmount) {
+            return (_turn: number) => arisan?.nominal || 0;
+        }
+
+        const n = arisan.totalMembers;
+        const target = arisan.targetAmount;
+        const selisihPeriodVal = arisan.selisihPeriod || 1;
+        const selisihPerPeriodArr = arisan.selisihPerPeriod || [50000];
+        const admin = arisan.adminFee || 0;
+
+        // Get selisih for the gap based on which period it belongs to
+        const getSelisihForGap = (gapIndex: number): number => {
+            if (selisihPeriodVal === 1) {
+                return selisihPerPeriodArr[0] || 0;
+            } else {
+                const periodIndex = Math.floor(gapIndex / selisihPeriodVal);
+                return selisihPerPeriodArr[periodIndex] || 0;
+            }
+        };
+
+        // Calculate total selisih sum for base contribution
+        let totalSelisihSum = 0;
+        for (let gap = 1; gap < n; gap++) {
+            totalSelisihSum += getSelisihForGap(gap) * (n - gap);
+        }
+        const baseContribution = Math.round((target + totalSelisihSum) / n);
+
+        return (turn: number) => {
+            let cumulativeReduction = 0;
+            for (let i = 1; i < turn; i++) {
+                cumulativeReduction += getSelisihForGap(i);
+            }
+            return Math.max(0, baseContribution - cumulativeReduction + admin);
+        };
+    }, [arisan]);
+
+    // Auto-fill contribution when turn is selected
+    useEffect(() => {
+        if (selectedTurn > 0 && arisan) {
+            if (arisan.mode === 'menurun') {
+                const amount = calculateContributionForTurn(selectedTurn);
+                setContributionAmount(amount.toString());
+            } else {
+                setContributionAmount(arisan.nominal.toString());
+            }
+        }
+    }, [selectedTurn, arisan, calculateContributionForTurn]);
+
+    // Auto-search when code is provided via URL
     useEffect(() => {
         if (code) {
             setInviteCode(code);
+            searchArisan(code);
         }
     }, [code]);
+
+    const searchArisan = async (codeToSearch: string) => {
+        if (!codeToSearch.trim() || codeToSearch.length < 4) return;
+
+        setIsSearching(true);
+        setError('');
+        try {
+            const foundArisan = await getArisanByInviteCode(codeToSearch);
+            if (foundArisan) {
+                setArisan(foundArisan);
+            } else {
+                setError('Arisan tidak ditemukan. Periksa kode undangan.');
+                setArisan(null);
+            }
+        } catch (err) {
+            console.error('Error searching arisan:', err);
+            setError('Terjadi kesalahan saat mencari arisan.');
+            setArisan(null);
+        } finally {
+            setIsSearching(false);
+        }
+    };
 
     const handleSearch = () => {
         setError('');
@@ -36,9 +119,7 @@ const JoinArisan: React.FC = () => {
             setError('Masukkan kode undangan');
             return;
         }
-        if (!arisan) {
-            setError('Arisan tidak ditemukan. Periksa kode undangan.');
-        }
+        searchArisan(inviteCode);
     };
 
     const handleJoin = async () => {
@@ -122,9 +203,9 @@ const JoinArisan: React.FC = () => {
                                 <button
                                     onClick={handleSearch}
                                     className="btn btn-primary w-full"
-                                    disabled={isLoading || !inviteCode.trim()}
+                                    disabled={isSearching || !inviteCode.trim()}
                                 >
-                                    {isLoading ? (
+                                    {isSearching ? (
                                         <>
                                             <Loader2 size={20} className="animate-pulse" />
                                             Mencari...
@@ -210,22 +291,51 @@ const JoinArisan: React.FC = () => {
                                             />
                                         </div>
 
-                                        {/* Input Nominal Setoran */}
+                                        {/* Pilih Giliran */}
                                         <div className="form-group">
-                                            <label className="form-label">Nominal Setoran Kamu</label>
+                                            <label className="form-label">Pilih Giliran <span className="text-error">*</span></label>
+                                            <select
+                                                className="form-input"
+                                                value={selectedTurn}
+                                                onChange={(e) => setSelectedTurn(parseInt(e.target.value))}
+                                            >
+                                                <option value={0}>-- Pilih Giliran --</option>
+                                                {availableTurns.map(turn => (
+                                                    <option key={turn} value={turn}>
+                                                        Giliran ke-{turn}
+                                                        {arisan.mode === 'menurun' && ` - ${formatCurrency(calculateContributionForTurn(turn))}`}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                            <p className="form-helper">
+                                                {availableTurns.length} giliran tersedia dari {arisan.totalMembers}
+                                            </p>
+                                        </div>
+
+                                        {/* Nominal Setoran (Auto-fill) */}
+                                        <div className="form-group">
+                                            <label className="form-label">Nominal Setoran</label>
                                             <div style={{ position: 'relative' }}>
                                                 <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }}>Rp</span>
                                                 <input
                                                     type="text"
-                                                    inputMode="numeric"
                                                     className="form-input"
-                                                    placeholder={arisan.nominal.toLocaleString('id-ID')}
-                                                    value={contributionAmount}
-                                                    onChange={(e) => setContributionAmount(e.target.value.replace(/\D/g, ''))}
-                                                    style={{ paddingLeft: 40 }}
+                                                    value={contributionAmount ? parseInt(contributionAmount).toLocaleString('id-ID') : ''}
+                                                    readOnly={arisan.mode === 'menurun'}
+                                                    placeholder={selectedTurn > 0 ? '' : 'Pilih giliran dulu'}
+                                                    onChange={(e) => arisan.mode !== 'menurun' && setContributionAmount(e.target.value.replace(/\D/g, ''))}
+                                                    style={{
+                                                        paddingLeft: 40,
+                                                        background: arisan.mode === 'menurun' ? 'var(--bg-secondary)' : undefined,
+                                                        cursor: arisan.mode === 'menurun' ? 'default' : undefined
+                                                    }}
                                                 />
                                             </div>
-                                            <p className="form-helper">Nominal standar: {formatCurrency(arisan.nominal)}</p>
+                                            <p className="form-helper">
+                                                {arisan.mode === 'menurun'
+                                                    ? '📊 Otomatis berdasarkan giliran'
+                                                    : `Nominal standar: ${formatCurrency(arisan.nominal)}`}
+                                            </p>
                                         </div>
 
                                         {/* Rekening Admin */}

@@ -127,9 +127,50 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
     const loginWithGoogle = async (): Promise<{ success: boolean; error?: string }> => {
         try {
-            await signInWithPopup(auth, googleProvider);
+            const result = await signInWithPopup(auth, googleProvider);
+            const fbUser = result.user;
+
+            // Immediately set user state to prevent double-click issue
+            // Check if user exists in Firestore
+            const userDoc = await getDoc(doc(db, 'users', fbUser.uid));
+            let appUser: User;
+
+            if (userDoc.exists()) {
+                const userData = userDoc.data();
+                appUser = {
+                    id: fbUser.uid,
+                    name: userData.name || fbUser.displayName || 'User',
+                    email: userData.email || fbUser.email || '',
+                    phone: userData.phone || '',
+                    avatar: userData.avatar || fbUser.photoURL || undefined,
+                    createdAt: userData.createdAt?.toDate() || new Date(),
+                };
+            } else {
+                // Create user document for new Google user
+                appUser = {
+                    id: fbUser.uid,
+                    name: fbUser.displayName || fbUser.email?.split('@')[0] || 'User',
+                    email: fbUser.email || '',
+                    phone: '',
+                    avatar: fbUser.photoURL || undefined,
+                    createdAt: new Date(),
+                };
+                await setDoc(doc(db, 'users', fbUser.uid), {
+                    name: appUser.name,
+                    email: appUser.email,
+                    phone: '',
+                    avatar: appUser.avatar,
+                    createdAt: serverTimestamp(),
+                });
+            }
+
+            // Set user state immediately
+            setUser(appUser);
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(appUser));
+
             return { success: true };
         } catch (error: unknown) {
+            console.error('Google login error:', error); // Log full error for debugging
             const firebaseError = error as { code?: string; message?: string };
             let errorMessage = 'Login dengan Google gagal. Silakan coba lagi.';
 
@@ -146,6 +187,17 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
                 case 'auth/account-exists-with-different-credential':
                     errorMessage = 'Akun dengan email ini sudah terdaftar dengan metode lain.';
                     break;
+                case 'auth/unauthorized-domain':
+                    errorMessage = 'Domain tidak diizinkan. Tambahkan localhost ke Authorized domains di Firebase Console.';
+                    break;
+                case 'auth/operation-not-allowed':
+                    errorMessage = 'Google Sign-In belum diaktifkan di Firebase Console.';
+                    break;
+                case 'auth/network-request-failed':
+                    errorMessage = 'Koneksi internet bermasalah. Coba lagi.';
+                    break;
+                default:
+                    errorMessage = `Login gagal: ${firebaseError.code || firebaseError.message || 'Unknown error'}`;
             }
 
             return { success: false, error: errorMessage };
