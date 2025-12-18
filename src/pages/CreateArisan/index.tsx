@@ -19,26 +19,6 @@ interface MemberInput {
     contributionAmount: string; // Individual iuran amount
 }
 
-// Calculate descending contribution amounts
-// Giliran 1 = N%, Giliran 2 = (N-1)%, ..., Giliran N = 1%
-// Contoh 12 anggota: 12%, 11%, 10%, 9%, 8%, 7%, 6%, 5%, 4%, 3%, 2%, 1%
-const calculateDescendingContributions = (targetAmount: number, totalMembers: number): number[] => {
-    if (totalMembers < 2 || targetAmount <= 0) return [];
-
-    const contributions: number[] = [];
-    const n = totalMembers;
-
-    // Simple linear percentage: Turn i gets (N - i + 1)% 
-    for (let i = 1; i <= n; i++) {
-        const percentage = n - i + 1; // Giliran 1 = N%, Giliran N = 1%
-        const contribution = (targetAmount * percentage) / 100;
-        contributions.push(Math.round(contribution));
-    }
-
-    return contributions;
-
-};
-
 const CreateArisan: React.FC = () => {
     const navigate = useNavigate();
     const { user } = useAuth();

@@ -166,6 +166,9 @@ export interface CreateArisanFormData {
     // Step 3: Turn Order
     turnMethod: TurnMethod;
     turnOrder: string[]; // member ids
+
+    // Optional: Payment accounts
+    paymentAccounts?: PaymentAccount[];
 }
 
 // Auth Types
