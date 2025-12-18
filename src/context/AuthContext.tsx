@@ -3,6 +3,8 @@ import {
     onAuthStateChanged,
     signInWithEmailAndPassword,
     createUserWithEmailAndPassword,
+    signInWithPopup,
+    GoogleAuthProvider,
     signOut,
     type User as FirebaseUser,
 } from 'firebase/auth';
@@ -10,12 +12,16 @@ import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { auth, db } from '../lib/firebase';
 import type { User } from '../types';
 
+// Initialize Google Auth Provider
+const googleProvider = new GoogleAuthProvider();
+
 interface AuthContextType {
     user: User | null;
     firebaseUser: FirebaseUser | null;
     isAuthenticated: boolean;
     isLoading: boolean;
     login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
+    loginWithGoogle: () => Promise<{ success: boolean; error?: string }>;
     register: (email: string, password: string, name: string) => Promise<{ success: boolean; error?: string }>;
     logout: () => Promise<void>;
 }
@@ -119,6 +125,33 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         }
     };
 
+    const loginWithGoogle = async (): Promise<{ success: boolean; error?: string }> => {
+        try {
+            await signInWithPopup(auth, googleProvider);
+            return { success: true };
+        } catch (error: unknown) {
+            const firebaseError = error as { code?: string; message?: string };
+            let errorMessage = 'Login dengan Google gagal. Silakan coba lagi.';
+
+            switch (firebaseError.code) {
+                case 'auth/popup-closed-by-user':
+                    errorMessage = 'Popup ditutup sebelum login selesai.';
+                    break;
+                case 'auth/popup-blocked':
+                    errorMessage = 'Popup diblokir oleh browser. Izinkan popup untuk login.';
+                    break;
+                case 'auth/cancelled-popup-request':
+                    errorMessage = 'Login dibatalkan.';
+                    break;
+                case 'auth/account-exists-with-different-credential':
+                    errorMessage = 'Akun dengan email ini sudah terdaftar dengan metode lain.';
+                    break;
+            }
+
+            return { success: false, error: errorMessage };
+        }
+    };
+
     const register = async (email: string, password: string, name: string): Promise<{ success: boolean; error?: string }> => {
         try {
             const userCredential = await createUserWithEmailAndPassword(auth, email, password);
@@ -170,6 +203,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
                 isAuthenticated: !!user,
                 isLoading,
                 login,
+                loginWithGoogle,
                 register,
                 logout,
             }}
